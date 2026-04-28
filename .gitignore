@@ -1,0 +1,7 @@
+# 설정 파일 제외
+.env
+
+# 특정 폴더 제외
+/specification/
+
+/data/
