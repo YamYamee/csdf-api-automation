@@ -3,3 +3,4 @@ notion-client
 PyGithub
 Github
 OpenAI
+streamlit
