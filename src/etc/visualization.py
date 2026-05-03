@@ -97,7 +97,7 @@ def render_params(params_raw):
         st.error(f"PARSING ERROR: {str(e)}")
 
 # --- [6] 메인 실행 ---
-st.markdown('<div class="system-title">AZURE API FORENSICS ANALYSIS</div>', unsafe_allow_html=True)
+st.markdown('<div class="system-title">AWS API FORENSICS ANALYSIS</div>', unsafe_allow_html=True)
 
 df = load_data()
 if df.empty:
