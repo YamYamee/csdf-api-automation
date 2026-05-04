@@ -1,0 +1,42 @@
+name: API Spec History Tracker
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  update-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas requests
+
+      - name: Run Sync
+        run: |
+          mkdir -p data/snapshots
+          python src/aws/aws_sync.py
+          python src/azure/azure_sync.py
+
+      - name: Update Checkpoints
+        run: |
+          # AWS는 develop 브랜치 SHA 추출
+          curl -s https://api.github.com/repos/boto/botocore/commits/develop | jq -r '.sha' > data/aws_last_sha.txt
+          # Azure는 main 브랜치 SHA 추출
+          curl -s https://api.github.com/repos/Azure/azure-rest-api-specs/commits/main | jq -r '.sha' > data/azure_last_sha.txt
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "CSDF-API-Bot"
+          git config --global user.email "bot@csdf.com"
+          git add data/
+          git commit -m "Auto-update: API History Snapshot $(date +'%Y-%m-%d')" || exit 0
+          git push

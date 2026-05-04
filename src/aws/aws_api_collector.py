@@ -1,89 +1,104 @@
-# AWS 서비스 정보를 GitHub에서 가져와 AI로 분석 후 Notion에 저장하는 스크립트
+import json
+import csv
+import pandas as pd
+from pathlib import Path
+from tqdm import tqdm
+import sys
 
-import os
-from github import Github
-from notion_client import Client
-from openai import OpenAI
-from dotenv import load_dotenv
+# --- 설정 ---
+# Botocore 저장소 내의 'data' 폴더 경로를 지정하세요.
+BASE_DIR = Path("C:/aws/data")
+DATA_DIR = Path("C:/Users/cartc/Documents/GitHub/csdf-azure-api-automation/data")
+OUTPUT_CSV = DATA_DIR / "aws_api_specs_complete.csv"
 
-load_dotenv()
+def set_safe_limit():
+    max_int = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(max_int)
+            return
+        except OverflowError:
+            max_int = int(max_int / 10)
 
-# 환경 변수 설정
-g = Github(os.getenv("GITHUB_TOKEN"))
-notion = Client(auth=os.getenv("NOTION_TOKEN"))
-ai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-DATABASE_ID = os.getenv("NOTION_DATABASE_ID_2")
+set_safe_limit()
 
-repo = g.get_repo("boto/botocore")
+def resolve_shapes(shape_name, shapes_dict, depth=0):
+    """AWS의 Shape 참조 구조를 재귀적으로 해석"""
+    if depth > 10 or not shape_name or shape_name not in shapes_dict:
+        return {"type": "referenced", "name": shape_name}
 
-def get_aws_info_from_ai(service_slug):
-    """서비스 ID(예: ec2)를 주면 전체 이름, 요약, 카테고리를 반환합니다."""
-    try:
-        prompt = f"""
-        AWS Service ID: {service_slug}
-        
-        이 서비스에 대해 다음 형식을 지켜서 한국어로 답해줘.
-        1. Full Name: (서비스의 공식 전체 명칭)
-        2. Category: (Compute, Storage, Database, ML, Security 등 대표 카테고리 하나)
-        3. Summary: (서비스의 역할을 설명하는 간결한 한 문장)
-        """
-        
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an AWS expert who categorizes and summarizes services accurately."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        # 결과 파싱 (간단하게 줄 단위로 분리)
-        lines = response.choices[0].message.content.strip().split('\n')
-        info = {}
-        for line in lines:
-            if "Full Name:" in line: info['full_name'] = line.split("Full Name:")[1].strip()
-            if "Category:" in line: info['category'] = line.split("Category:")[1].strip()
-            if "Summary:" in line: info['summary'] = line.split("Summary:")[1].strip()
-        return info
-    except:
-        return {"full_name": service_slug, "category": "General", "summary": "정보를 가져오지 못했습니다."}
-
-def save_to_notion(display_name, description, category):
-    try:
-        notion.pages.create(
-            parent={"database_id": DATABASE_ID},
-            properties={
-                "이름": {"title": [{"text": {"content": display_name}}]},
-                "설명": {"rich_text": [{"text": {"content": description}}]},
-                "카테고리": {"select": {"name": category}}
-            }
-        )
-        print(f" ✅ 저장 완료: {display_name} [{category}]")
-    except Exception as e:
-        print(f" ❌ 저장 실패: {display_name} | {e}")
-
-def run_sync():
-    data_path = "botocore/data"
-    print("🔎 AWS 서비스 폴더 탐색 시작...")
+    shape_info = shapes_dict[shape_name].copy()
     
-    try:
-        # botocore/data의 하위 폴더 리스트만 가져옴
-        contents = repo.get_contents(data_path)
+    if shape_info.get("type") == "structure":
+        members = shape_info.get("members", {})
+        resolved_members = {}
+        for m_name, m_info in members.items():
+            target_shape = m_info.get("shape")
+            resolved_members[m_name] = resolve_shapes(target_shape, shapes_dict, depth + 1)
+        shape_info["resolved_members"] = resolved_members
+    
+    elif shape_info.get("type") == "list":
+        member_shape = shape_info.get("member", {}).get("shape")
+        if member_shape:
+            shape_info["resolved_item"] = resolve_shapes(member_shape, shapes_dict, depth + 1)
+
+    return shape_info
+
+def main():
+    if not DATA_DIR.exists(): DATA_DIR.mkdir(parents=True)
+    all_api_data = []
+    
+    print(f"🚀 AWS API 스펙 수집 시작 (Azure 필드명 매핑)...")
+
+    if not BASE_DIR.exists():
+        print(f"❌ 경로를 찾을 수 없습니다: {BASE_DIR}")
+        return
+
+    service_dirs = [d for d in BASE_DIR.iterdir() if d.is_dir()]
+
+    for s_dir in tqdm(service_dirs, desc="Parsing Services"):
+        # 최신 버전 폴더 선택
+        version_dirs = sorted([v for v in s_dir.iterdir() if v.is_dir()], key=lambda x: x.name)
+        if not version_dirs: continue
         
-        for content in contents:
-            if content.type == "dir":
-                service_slug = content.name  # 예: ec2, s3, lambda
-                
-                print(f" > 분석 중: {service_slug}...", end="\r")
-                
-                # AI에게 서비스 정보를 한꺼번에 물어봄
-                info = get_aws_info_from_ai(service_slug)
-                
-                # 노션 저장 (카테고리 포함)
-                save_to_notion(info['full_name'], info['summary'], info['category'])
+        latest_version_dir = version_dirs[-1]
+        service_2_file = latest_version_dir / "service-2.json"
+        
+        if not service_2_file.exists(): continue
 
-        print("\n✨ AWS 서비스 목록화 작업이 모두 끝났습니다!")
+        try:
+            with open(service_2_file, 'r', encoding='utf-8') as f:
+                service_def = json.load(f)
+            
+            metadata = service_def.get('metadata', {})
+            operations = service_def.get('operations', {})
+            shapes = service_def.get('shapes', {})
+            
+            service_id = metadata.get('serviceId', s_dir.name).replace(" ", "_").lower()
 
-    except Exception as e:
-        print(f"❌ 에러 발생: {e}")
+            for op_name, op_info in operations.items():
+                input_shape = op_info.get('input', {}).get('shape')
+                output_shape = op_info.get('output', {}).get('shape')
+                
+                resolved_input = resolve_shapes(input_shape, shapes) if input_shape else {}
+                resolved_output = resolve_shapes(output_shape, shapes) if output_shape else {}
+
+                # --- Azure 필드명과 통일 ---
+                all_api_data.append({
+                    "Service_Path": service_id,
+                    "Version": latest_version_dir.name,
+                    "Endpoint": op_info.get('http', {}).get('requestUri', '/'),
+                    "Method": op_info.get('http', {}).get('method', 'POST'),
+                    "Parameters": json.dumps(resolved_input, ensure_ascii=False),
+                    "Response": json.dumps(resolved_output, ensure_ascii=False),
+                    "Source_File": str(service_2_file.relative_to(BASE_DIR))
+                })
+        except: continue
+
+    if all_api_data:
+        df = pd.DataFrame(all_api_data)
+        df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
+        print(f"\n✅ 저장 완료! {len(df)}개 API -> {OUTPUT_CSV}")
 
 if __name__ == "__main__":
-    run_sync()
+    main()
