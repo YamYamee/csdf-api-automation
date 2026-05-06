@@ -6,28 +6,29 @@ from tqdm import tqdm
 import sys
 
 # --- 설정 ---
-# Botocore 저장소 내의 'data' 폴더 경로를 지정하세요.
-BASE_DIR = Path("C:/aws/data")
-DATA_DIR = Path("C:/Users/cartc/Documents/GitHub/csdf-azure-api-automation/data")
+# Botocore 저장소 내의 'data' 폴더 경로를 지정
+BASE_DIR = Path("C:/azure/aws_specification")
+DATA_DIR = Path("C:/azure/data")
 OUTPUT_CSV = DATA_DIR / "aws_api_specs_complete.csv"
 
 def set_safe_limit():
+    # CSV 필드 크기 제한을 시스템 최대값으로 설정 (OverflowError 방지)
     max_int = sys.maxsize
     while True:
         try:
             csv.field_size_limit(max_int)
             return
-        except OverflowError:
+        except OverflowError: # 너무 크면 OverflowError 발생, 10배씩 줄여가며 시도
             max_int = int(max_int / 10)
 
 set_safe_limit()
 
 def resolve_shapes(shape_name, shapes_dict, depth=0):
-    """AWS의 Shape 참조 구조를 재귀적으로 해석"""
+    # 재귀 깊이가 10을 넘거나 정의가 없으면 중단
     if depth > 10 or not shape_name or shape_name not in shapes_dict:
         return {"type": "referenced", "name": shape_name}
 
-    shape_info = shapes_dict[shape_name].copy()
+    shape_info = shapes_dict[shape_name].copy() # 해당 shape 정보 복사
     
     if shape_info.get("type") == "structure":
         members = shape_info.get("members", {})
@@ -48,10 +49,10 @@ def main():
     if not DATA_DIR.exists(): DATA_DIR.mkdir(parents=True)
     all_api_data = []
     
-    print(f"🚀 AWS API 스펙 수집 시작 (Azure 필드명 매핑)...")
+    print(f"Starting AWS API collection from: {BASE_DIR}")
 
     if not BASE_DIR.exists():
-        print(f"❌ 경로를 찾을 수 없습니다: {BASE_DIR}")
+        print(f"Base directory does not exist: {BASE_DIR}")
         return
 
     service_dirs = [d for d in BASE_DIR.iterdir() if d.is_dir()]
@@ -93,7 +94,9 @@ def main():
                     "Response": json.dumps(resolved_output, ensure_ascii=False),
                     "Source_File": str(service_2_file.relative_to(BASE_DIR))
                 })
-        except: continue
+        except Exception as e:
+            print(f"❌ Error occurred while processing {service_2_file}: {e}")
+            continue
 
     if all_api_data:
         df = pd.DataFrame(all_api_data)
